@@ -1,0 +1,91 @@
+# [EXPLAIN-D979]
+name: CMS Orbit types
+description: Generate TypeScript types for your CMS Orbit space, or check that the committed types are up to date
+author: Bifröst Orbit
+branding:
+  icon: refresh-cw
+  color: gray-dark
+
+inputs:
+  api-url:
+    description: The CMS Orbit API address, such as https://api.bifrostorbit.com/cms
+    required: true
+  public-key:
+    description: A public cms_pk_ key for the space. Keep it in a secret.
+    required: true
+  output:
+    description: The types file to write or check
+    required: false
+    default: src/cms/types.ts
+  check:
+    description: Fail when the committed types differ from the space's schema, without changing them
+    required: false
+    default: "false"
+  node-version:
+    description: The Node.js version to set up
+    required: false
+    default: "24"
+  sdk-version:
+    description: The version of @bifrost-orbit-cms/sdk to run
+    required: false
+    default: latest
+
+outputs:
+  changed:
+    description: true when the generated types differ from the file in the repository, otherwise false
+    value: ${{ steps.generate.outputs.changed }}
+  types-path:
+    description: The path of the types file
+    value: ${{ steps.generate.outputs.types-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Node.js
+      uses: actions/setup-node@v7
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Generate types
+      id: generate
+      shell: bash
+      env:
+        CMS_API_URL: ${{ inputs.api-url }}
+        CMS_PUBLIC_KEY: ${{ inputs.public-key }}
+        TYPES_PATH: ${{ inputs.output }}
+        CHECK: ${{ inputs.check }}
+        SDK_VERSION: ${{ inputs.sdk-version }}
+      run: |
+        set -euo pipefail
+        [[ -n "$CMS_API_URL" ]] || { echo "::error::Set api-url to your CMS Orbit API address."; exit 1; }
+        [[ -n "$CMS_PUBLIC_KEY" ]] || { echo "::error::Set public-key to a public cms_pk_ key, for example from secrets.CMS_PUBLIC_KEY."; exit 1; }
+        echo "::add-mask::$CMS_PUBLIC_KEY"
+        [[ -n "$CMS_DEFAULT_REGION" ]] || unset CMS_DEFAULT_REGION
+        echo "types-path=$TYPES_PATH" >> "$GITHUB_OUTPUT"
+
+        work=$(mktemp -d "${RUNNER_TEMP:-/tmp}/cms-orbit.XXXXXX")
+        trap 'rm -rf "$work"' EXIT
+        generated="$work/$(basename "$TYPES_PATH")"
+        npx --yes --package "@bifrost-orbit-cms/sdk@$SDK_VERSION" cms-orbit generate --out "$generated"
+
+        if [[ -f "$TYPES_PATH" ]] && cmp -s "$TYPES_PATH" "$generated"; then
+          echo "changed=false" >> "$GITHUB_OUTPUT"
+          echo "The types in $TYPES_PATH are up to date with CMS Orbit."
+          exit 0
+        fi
+        echo "changed=true" >> "$GITHUB_OUTPUT"
+
+        if [[ "$CHECK" == true ]]; then
+          message="The types in $TYPES_PATH are out of date with CMS Orbit. Run cms-orbit generate and commit the result."
+          if [[ -f "$TYPES_PATH" ]]; then
+            diff -u --label "$TYPES_PATH (committed)" --label "$TYPES_PATH (CMS Orbit)" "$TYPES_PATH" "$generated" || true
+          else
+            message="$TYPES_PATH does not exist yet. Run cms-orbit generate and commit the result."
+          fi
+          echo "::error file=$TYPES_PATH::$message"
+          exit 1
+        fi
+
+        mkdir -p "$(dirname "$TYPES_PATH")"
+        cp "$generated" "$TYPES_PATH"
+        echo "Wrote the types to $TYPES_PATH."
